@@ -49,7 +49,9 @@ Esto es lo importante. Tres scripts, no uno.
 rider_id (slug de PCS)  |  name  |  nationality  |  birth_date  |  age_2026
 current_team  |  first_pro_year  |  first_pro_team  |  age_turned_pro
 last_amateur_team  |  last_amateur_year  |  top10s_before_pro
+finished_race
 ```
+`finished_race`: `False` si el corredor aparece como `dropout` en la startlist de PCS (DNF/DNS/etc.), `True` si no. Solo es válido con una startlist descargada después de terminar la etapa 21.
 
 **teams** (una fila por corredor y año)
 ```

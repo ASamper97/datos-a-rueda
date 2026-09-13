@@ -1,3 +1,6 @@
 cache/
 data/
 .venv/
+logs/
+user_agent.txt
+__pycache__/
