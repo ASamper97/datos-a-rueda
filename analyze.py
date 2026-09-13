@@ -11,6 +11,8 @@ Outputs:
 - pathways.csv / pathways.png: riders per level of that previous team.
 - development_teams.csv / development_teams.png: for riders who came straight
   from a development team, riders per development team (renames grouped).
+- age_by_route.csv / age_by_route.png: age when joining the first WT/PRT, by
+  route, with permutation tests printed to the console.
 """
 import textwrap
 from pathlib import Path
@@ -19,8 +21,9 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
-from matplotlib.patches import FancyBboxPatch, Rectangle  # noqa: E402
+from matplotlib.patches import Circle, FancyBboxPatch, Rectangle  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
@@ -92,6 +95,14 @@ FONT = ["Segoe UI", "Arial", "DejaVu Sans"]
 # More bars than this and labels drop below ~11 px on a 390 px-wide phone.
 MOBILE_MAX_BARS = 13
 SEGMENT_GAP = 4  # surface gap between segments of a folded bar
+GUIDE = "#1E3A4F"  # hairline guides, one step off the background
+
+# Age by route. "none" (no previous team listed) is left out: one rider.
+ROUTES = ["development", "CT", "amateur"]
+HIGHLIGHT_AGE = 19
+N_PERMUTATIONS = 20_000
+RNG_SEED = 2026
+ALPHA = 0.05
 
 
 # --- tables ---------------------------------------------------------------------
@@ -157,6 +168,99 @@ def development_teams(pathways_table: pd.DataFrame) -> pd.DataFrame:
     )
     return table.reset_index().sort_values(["riders", "sponsor"], ascending=[False, True],
                                            ignore_index=True)
+
+
+def route_ages(pathways_table: pd.DataFrame, riders: pd.DataFrame) -> pd.DataFrame:
+    """Riders on the compared routes with their age at the first WT/PRT.
+
+    age_first_top (season minus birth year) is the age compared across
+    routes. age_turned_pro from parse.py counts a Continental team as turning
+    pro, so on the Continental route it dates the Continental spell, not the
+    step up; it is kept in the table for reference only.
+    """
+    ages = pathways_table.merge(riders[["rider_id", "birth_date", "age_turned_pro"]],
+                                on="rider_id", validate="one_to_one")
+    ages["birth_year"] = pd.to_datetime(ages["birth_date"]).dt.year
+    ages["age_first_top"] = ages["first_top_year"].astype(int) - ages["birth_year"]
+    return ages[ages["arrived_from_level"].isin(ROUTES)].reset_index(drop=True)
+
+
+def age_summary(ages: pd.DataFrame, rng: np.random.Generator) -> pd.DataFrame:
+    rows = []
+    for route in ROUTES:
+        group = ages[ages["arrived_from_level"] == route]
+        values = group["age_first_top"].to_numpy()
+        boot = np.median(rng.choice(values, (N_PERMUTATIONS, values.size)), axis=1)
+        rows.append({
+            "route": CATEGORIES[route],
+            "riders": values.size,
+            "median_age_first_top": np.median(values),
+            "min_age_first_top": values.min(),
+            "max_age_first_top": values.max(),
+            "median_95ci_low": np.percentile(boot, 2.5),
+            "median_95ci_high": np.percentile(boot, 97.5),
+            f"stepped_up_at_{HIGHLIGHT_AGE}": int((values == HIGHLIGHT_AGE).sum()),
+            "median_age_turned_pro": group["age_turned_pro"].median(),
+            "min_age_turned_pro": group["age_turned_pro"].min(),
+            "max_age_turned_pro": group["age_turned_pro"].max(),
+        })
+    return pd.DataFrame(rows)
+
+
+def _kruskal_h(ranks: np.ndarray, label_rows: np.ndarray) -> np.ndarray:
+    """Kruskal-Wallis H (without tie correction) for each row of labels.
+
+    The tie correction depends only on the pooled values, which permutations
+    don't change, so it cancels out of a permutation p-value.
+    """
+    n = ranks.size
+    h = np.zeros(label_rows.shape[0])
+    for route in ROUTES:
+        mask = label_rows == route
+        size = mask.sum(axis=1)
+        h += size * ((mask * ranks).sum(axis=1) / size - (n + 1) / 2) ** 2
+    return 12 / (n * (n + 1)) * h
+
+
+def _p_value(null: np.ndarray, observed: float) -> float:
+    return (np.sum(null >= observed - 1e-9) + 1) / (null.size + 1)
+
+
+def age_tests(ages: pd.DataFrame, rng: np.random.Generator) -> dict:
+    """Permutation tests on age_first_top across routes."""
+    values = ages["age_first_top"].to_numpy(dtype=float)
+    labels = ages["arrived_from_level"].to_numpy()
+    ranks = pd.Series(values).rank(method="average").to_numpy()
+    observed = _kruskal_h(ranks, labels[None, :])[0]
+
+    shuffled = labels[rng.random((N_PERMUTATIONS, labels.size)).argsort(axis=1)]
+    # Same test with labels shuffled only among riders born the same year, so
+    # a route can't look older just because its riders were born earlier.
+    within_year = np.tile(labels, (N_PERMUTATIONS, 1))
+    for year in np.unique(ages["birth_year"]):
+        idx = np.flatnonzero(ages["birth_year"].to_numpy() == year)
+        within_year[:, idx] = labels[idx[rng.random((N_PERMUTATIONS, idx.size)).argsort(axis=1)]]
+
+    pairs = []
+    for a, b in [("development", "CT"), ("development", "amateur"), ("CT", "amateur")]:
+        x, y = values[labels == a], values[labels == b]
+        pooled = np.concatenate([x, y])
+        perm = pooled[rng.random((N_PERMUTATIONS, pooled.size)).argsort(axis=1)]
+        null = np.abs(np.median(perm[:, :x.size], axis=1) - np.median(perm[:, x.size:], axis=1))
+        gap = abs(np.median(x) - np.median(y))
+        pairs.append({"routes": (a, b), "median_gap": gap, "p": _p_value(null, gap)})
+    # Holm correction for the three pairwise comparisons.
+    running = 0.0
+    for rank, pair in enumerate(sorted(pairs, key=lambda d: d["p"])):
+        running = max(running, min(1.0, (len(pairs) - rank) * pair["p"]))
+        pair["p_holm"] = running
+
+    return {
+        "kruskal_h": observed,
+        "p": _p_value(_kruskal_h(ranks, shuffled), observed),
+        "p_within_birth_year": _p_value(_kruskal_h(ranks, within_year), observed),
+        "pairs": pairs,
+    }
 
 
 # --- charts ---------------------------------------------------------------------
@@ -281,6 +385,58 @@ def development_teams_chart(table: pd.DataFrame, path: Path) -> None:
     save(fig, path)
 
 
+def age_by_route_chart(ages: pd.DataFrame, summary: pd.DataFrame, tests: dict,
+                       path: Path) -> None:
+    """One dot per rider at their age, one row per route, median marked."""
+    clear_gap = tests["p_within_birth_year"] < ALPHA and any(
+        pair["p_holm"] < ALPHA for pair in tests["pairs"])
+    highlighted = int((ages["age_first_top"] == HIGHLIGHT_AGE).sum())
+    fig, ax = canvas(
+        "Age at the step up differs\nby route" if clear_gap
+        else "No clear age gap\nbetween the three routes",
+        f"Age when riders joined their first WorldTeam or ProTeam. Each dot is a rider; "
+        f"green marks the {highlighted} who stepped up at {HIGHLIGHT_AGE}",
+        "Age = season minus birth year. One rider with no earlier team listed isn't shown.\n"
+        "Small samples, and recent riders can only have stepped up young.",
+    )
+    age_min, age_max = int(ages["age_first_top"].min()), int(ages["age_first_top"].max())
+    x_left, x_right = MARGIN + 60, SIZE_PX - MARGIN - 60
+    step = (x_right - x_left) / max(age_max - age_min, 1)
+    x_of = lambda age: x_left + (age - age_min) * step  # noqa: E731
+    radius, pitch, per_line = 9, 24, 5
+    top, block = 366, 172
+
+    guides_top, guides_bottom = top + 40, top + block * (len(ROUTES) - 1) + 150
+    for age in range(age_min, age_max + 1):
+        ax.plot([x_of(age)] * 2, [guides_top, guides_bottom], color=GUIDE, linewidth=0.5,
+                solid_capstyle="butt", zorder=0)
+        ax.text(x_of(age), guides_bottom + 14, f"{age}", color=TEXT_MUTED, fontsize=11,
+                ha="center", va="top")
+
+    for i, route in enumerate(ROUTES):
+        y = top + i * block
+        stats = summary[summary["route"] == CATEGORIES[route]].iloc[0]
+        ax.text(MARGIN, y, f"{CATEGORIES[route]}  ·  {stats.riders} riders  ·  "
+                f"median {stats.median_age_first_top:g}",
+                color=TEXT_PRIMARY, fontsize=12, va="top")
+        dots_top = y + 62
+        # median caret between the label and the dots
+        mx = x_of(stats.median_age_first_top)
+        ax.add_patch(plt.Polygon([(mx - 8, dots_top - 22), (mx + 8, dots_top - 22),
+                                  (mx, dots_top - 10)], closed=True, facecolor=TEXT_PRIMARY,
+                                 linewidth=0))
+        counts = ages.loc[ages["arrived_from_level"] == route, "age_first_top"].value_counts()
+        for age, n in counts.items():
+            color = BAR_HIGHLIGHT if age == HIGHLIGHT_AGE else BAR_MUTED
+            for k in range(n):
+                line, col = divmod(k, per_line)
+                in_line = min(per_line, n - line * per_line)
+                cx = x_of(age) + (col - (in_line - 1) / 2) * pitch
+                ax.add_patch(Circle((cx, dots_top + radius + line * pitch), radius,
+                                    facecolor=color, linewidth=0))
+    save(fig, path)
+
+
 def main() -> None:
     riders = pd.read_parquet(DATA_DIR / "riders.parquet")
     teams = pd.read_parquet(DATA_DIR / "teams.parquet")
@@ -304,6 +460,21 @@ def main() -> None:
           "-> data/development_teams.csv, data/development_teams.png")
     for row in devo.itertuples():
         print(f"  {row.sponsor:30} {row.riders:3}   {row.team_names}")
+
+    rng = np.random.default_rng(RNG_SEED)
+    ages = route_ages(table, riders)
+    summary = age_summary(ages, rng)
+    tests = age_tests(ages, rng)
+    summary.to_csv(DATA_DIR / "age_by_route.csv", index=False, sep=";", encoding="utf-8-sig")
+    age_by_route_chart(ages, summary, tests, DATA_DIR / "age_by_route.png")
+    print(f"{len(ages)} riders by route -> data/age_by_route.csv, data/age_by_route.png")
+    print(summary.drop(columns="route").set_index(summary["route"]).T.to_string())
+    print(f"  Kruskal-Wallis H={tests['kruskal_h']:.2f}  permutation p={tests['p']:.3f}  "
+          f"within birth year p={tests['p_within_birth_year']:.3f}")
+    for pair in tests["pairs"]:
+        a, b = pair["routes"]
+        print(f"  {a} vs {b}: median gap {pair['median_gap']:g}  p={pair['p']:.3f}  "
+              f"Holm p={pair['p_holm']:.3f}")
 
 
 if __name__ == "__main__":
