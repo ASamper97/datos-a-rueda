@@ -1,11 +1,17 @@
 # Brief: scraper PCS — jóvenes de la Vuelta 2026
 
 ## Objetivo
-Extraer, para cada corredor de 23 años o menos de la lista de salida de la Vuelta a España 2026:
+Extraer, para cada corredor nacido en 2001 o después de la lista de salida de la Vuelta a España 2026:
 - Nombre, nacionalidad, fecha de nacimiento, equipo actual
 - Historial de equipos (año a año), incluyendo etapa amateur/sub-23
-- Año y edad en que pasó a profesional (primer equipo UCI: WorldTeam, ProTeam o Continental)
+- Año y edad en que pasó a profesional (primer equipo UCI: WorldTeam, ProTeam o Continental que no sea filial de desarrollo)
 - Número de top-10 en carreras UCI antes de pasar a profesional
+- Si terminó la carrera y, si no, tipo y etapa del abandono
+
+## Decisiones cerradas (13/09/2026)
+1. **Corte de edad:** nacidos en 2001 o después, por año de nacimiento (criterio UCI). Sustituye al "23 años o menos" inicial.
+2. **Filiales de desarrollo:** etiqueta propia, `team_level = development`; no cuentan como amateur ni como profesional. Pasar a profesional = primer equipo WT, PRT o CT que no sea filial.
+3. **Abandonos:** `finished_race`, `dropout_type` y `dropout_stage` en el esquema de `riders`, sacados de la startlist de PCS.
 
 ## Entorno
 
@@ -49,9 +55,13 @@ Esto es lo importante. Tres scripts, no uno.
 rider_id (slug de PCS)  |  name  |  nationality  |  birth_date  |  age_2026
 current_team  |  first_pro_year  |  first_pro_team  |  age_turned_pro
 last_amateur_team  |  last_amateur_year  |  top10s_before_pro
-finished_race
+finished_race  |  dropout_type  |  dropout_stage
 ```
-`finished_race`: `False` si el corredor aparece como `dropout` en la startlist de PCS (DNF/DNS/etc.), `True` si no. Solo es válido con una startlist descargada después de terminar la etapa 21.
+- `finished_race`: `False` si el corredor aparece como `dropout` en la startlist de PCS, `True` si no.
+- `dropout_type`: el código que pone PCS (en la startlist actual, `DNF` o `DNS`). `None` si terminó.
+- `dropout_stage`: número de etapa que PCS pone tras `#` (`(DNF #8)` → `8`). `None` si terminó.
+
+En el HTML: `<li class="dropout">… <a href="rider/…">NOMBRE</a> (DNF #8)</li>`. Los tres campos solo son válidos con una startlist descargada después de terminar la etapa 21.
 
 **teams** (una fila por corredor y año)
 ```
@@ -67,7 +77,7 @@ rider_id  |  year  |  team_name  |  team_level
 4. **Nombres de equipo cambiantes** año a año (cambio de patrocinador). Normaliza antes de agregar o contarás el mismo equipo dos veces.
 
 ## Criterio de "hecho"
-- `data/riders.parquet` existe con una fila por corredor sub-24 de la lista de salida.
+- `data/riders.parquet` existe con una fila por corredor nacido en 2001 o después de la lista de salida.
 - Un log que diga cuántos corredores tienen datos incompletos y cuáles.
 - Reejecutar `parse.py` tarda segundos, no minutos.
 
