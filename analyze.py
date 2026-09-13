@@ -1,4 +1,4 @@
-"""Analysis layer: data/*.parquet -> data/pathways.csv and data/pathways.png.
+"""Analysis layer: data/*.parquet -> tables and charts in data/.
 
 Reads only the parquet files written by parse.py: no HTML, no network.
 
@@ -6,6 +6,11 @@ The question: where did each rider come from when they joined their first
 WorldTeam or ProTeam? "Where from" is the level of their last team before
 that spell (trainee/stagiaire contracts don't count, neither as the WT/PRT
 spell nor as the team before it).
+
+Outputs:
+- pathways.csv / pathways.png: riders per level of that previous team.
+- development_teams.csv / development_teams.png: for riders who came straight
+  from a development team, riders per development team (renames grouped).
 """
 import textwrap
 from pathlib import Path
@@ -42,8 +47,41 @@ CATEGORIES = {
 }
 HIGHLIGHT = "development"
 
-# Chart style (square PNG for mobile).
+# Development team (PCS name) -> sponsor line, so a renamed team counts once.
+DEVELOPMENT_TEAM_SPONSOR = {
+    "AG2R Citroën U23 Team": "Decathlon AG2R La Mondiale",
+    "Decathlon AG2R La Mondiale Development Team": "Decathlon AG2R La Mondiale",
+    "Alpecin-Deceuninck Development Team": "Alpecin-Deceuninck",
+    "Arkéa - B&B Hôtels Continentale": "Arkéa-B&B Hotels",
+    "Astana Qazaqstan Development Team": "Astana Qazaqstan",
+    "Bahrain Victorious Development Team": "Bahrain Victorious",
+    "Development Team DSM": "DSM / Picnic PostNL",
+    "Development Team dsm-firmenich PostNL": "DSM / Picnic PostNL",
+    "Development Team Picnic PostNL": "DSM / Picnic PostNL",
+    "Equipe continentale Groupama-FDJ": "Groupama-FDJ",
+    # Israel names stop in 2025 and NSN names start in 2026; three of the four
+    # riders on Israel teams in 2025 are on NSN teams in 2026.
+    "Israel Cycling Academy": "Israel-Premier Tech / NSN",
+    "Israel Premier Tech Academy": "Israel-Premier Tech / NSN",
+    "NSN Development Team": "Israel-Premier Tech / NSN",
+    "Jumbo-Visma Development Team": "Visma | Lease a Bike",
+    "Team Visma | Lease a Bike Development": "Visma | Lease a Bike",
+    "Lidl - Trek Future Racing": "Lidl-Trek",
+    "Lotto - Soudal U23": "Lotto",
+    "Lotto Development Team": "Lotto",
+    "Lotto Dstny Development Team": "Lotto",
+    "Q36.5 Continental Team": "Q36.5",
+    "Red Bull - BORA - hansgrohe Rookies": "Red Bull-BORA-hansgrohe",
+    "Soudal Quick-Step Devo Team": "Soudal Quick-Step",
+    "Tudor Pro Cycling Team U23": "Tudor",
+    "UAE Team Emirates Gen Z": "UAE Team Emirates",
+    "Uno-X Dare Development Team": "Uno-X Mobility",
+    "Uno-X Mobility Development Team": "Uno-X Mobility",
+}
+
+# Chart style (square PNG for mobile), in pixel coordinates.
 SIZE_PX, DPI = 1080, 180
+MARGIN = 76
 BACKGROUND = "#0E2436"
 BAR_HIGHLIGHT = "#1D9E75"
 BAR_MUTED = "#5E6E7B"
@@ -51,7 +89,12 @@ TEXT_PRIMARY = "#F2F5F7"
 TEXT_SECONDARY = "#A9B6C0"
 TEXT_MUTED = "#7F8E99"
 FONT = ["Segoe UI", "Arial", "DejaVu Sans"]
+# More bars than this and labels drop below ~11 px on a 390 px-wide phone.
+MOBILE_MAX_BARS = 13
+SEGMENT_GAP = 4  # surface gap between segments of a folded bar
 
+
+# --- tables ---------------------------------------------------------------------
 
 def adjusted_teams(teams: pd.DataFrame) -> pd.DataFrame:
     teams = teams.copy()
@@ -100,32 +143,77 @@ def pathways(riders: pd.DataFrame, teams: pd.DataFrame) -> pd.DataFrame:
     return table.astype({"first_top_year": "Int64"})
 
 
-def draw_bar(ax, x: float, y: float, length: float, thickness: float, color: str) -> None:
-    """Bar with a rounded data end and a square baseline."""
-    radius = min(12, length / 2)
+def development_teams(pathways_table: pd.DataFrame) -> pd.DataFrame:
+    """One row per sponsor line: riders who stepped up straight from it."""
+    devo = pathways_table[pathways_table["arrived_from_level"] == "development"].copy()
+    unmapped = sorted(set(devo["arrived_from_team"]) - DEVELOPMENT_TEAM_SPONSOR.keys())
+    if unmapped:
+        raise SystemExit(f"development teams without a sponsor line: {unmapped}")
+    devo["sponsor"] = devo["arrived_from_team"].map(DEVELOPMENT_TEAM_SPONSOR)
+    table = devo.groupby("sponsor").agg(
+        riders=("rider_id", "size"),
+        team_names=("arrived_from_team", lambda s: " + ".join(sorted(set(s)))),
+        rider_names=("name", lambda s: ", ".join(sorted(s))),
+    )
+    return table.reset_index().sort_values(["riders", "sponsor"], ascending=[False, True],
+                                           ignore_index=True)
+
+
+# --- charts ---------------------------------------------------------------------
+
+def draw_bar(ax, x: float, y: float, length: float, thickness: float, color: str,
+             radius: float = 12) -> None:
+    """Bar with a rounded data end and a square baseline.
+
+    snap=False keeps the square part on the same sub-pixel edges as the
+    rounded part; snapped, it leaves a 1 px step at the baseline.
+    """
+    radius = min(radius, length / 2)
     ax.add_patch(FancyBboxPatch((x, y), length, thickness, linewidth=0, facecolor=color,
-                                boxstyle=f"round,pad=0,rounding_size={radius}"))
-    ax.add_patch(Rectangle((x, y), radius, thickness, linewidth=0, facecolor=color))
+                                boxstyle=f"round,pad=0,rounding_size={radius}", snap=False))
+    ax.add_patch(Rectangle((x, y), radius, thickness, linewidth=0, facecolor=color, snap=False))
 
 
-def chart(counts: pd.Series, total: int, path: Path) -> None:
+def right_edge(fig, ax, text) -> float:
+    """x (pixels) where a text artist ends."""
+    fig.canvas.draw()
+    return ax.transData.inverted().transform(text.get_window_extent().get_points())[1][0]
+
+
+def canvas(title: str, subtitle: str, note: str):
+    """Square figure in pixel coordinates with the shared header and footer."""
     plt.rcParams["font.family"] = FONT
     fig = plt.figure(figsize=(SIZE_PX / DPI, SIZE_PX / DPI), dpi=DPI, facecolor=BACKGROUND)
     ax = fig.add_axes((0, 0, 1, 1))
     ax.set_xlim(0, SIZE_PX)
-    ax.set_ylim(SIZE_PX, 0)  # pixel coordinates, y grows downwards
+    ax.set_ylim(SIZE_PX, 0)  # y grows downwards
     ax.axis("off")
-
-    margin = 76
-    ax.text(margin, 70, "How they reached their first\nWorldTeam or ProTeam", color=TEXT_PRIMARY,
-            fontsize=21, fontweight="bold", va="top", linespacing=1.15)
-    subtitle = (f"Last team before stepping up, for the {total} riders "
-                "born 2001 or later who started the 2026 Vuelta")
-    ax.text(margin, 232, textwrap.fill(subtitle, 62), color=TEXT_SECONDARY,
+    ax.text(MARGIN, 70, title, color=TEXT_PRIMARY, fontsize=21, fontweight="bold",
+            va="top", linespacing=1.15)
+    ax.text(MARGIN, 232, textwrap.fill(subtitle, 62), color=TEXT_SECONDARY,
             fontsize=11.5, va="top", linespacing=1.35)
+    ax.text(MARGIN, 958, note, color=TEXT_MUTED, fontsize=8.5, va="top", linespacing=1.4)
+    ax.text(MARGIN, 1024, "Source: ProCyclingStats", color=TEXT_MUTED, fontsize=8.5, va="top")
+    ax.text(SIZE_PX - MARGIN, 1024, "@DatosARueda", color=TEXT_MUTED, fontsize=8.5,
+            va="top", ha="right")
+    return fig, ax
 
+
+def save(fig, path: Path) -> None:
+    fig.savefig(path, dpi=DPI, facecolor=BACKGROUND)
+    plt.close(fig)
+
+
+def pathways_chart(counts: pd.Series, total: int, path: Path) -> None:
+    fig, ax = canvas(
+        "How they reached their first\nWorldTeam or ProTeam",
+        f"Last team before stepping up, for the {total} riders "
+        "born 2001 or later who started the 2026 Vuelta",
+        "Development team: U23 squad of a WorldTeam or ProTeam.\n"
+        "Stagiaire contracts don't count as stepping up.",
+    )
     # Room on the right for the value and percentage of the longest bar.
-    bar_left, bar_max = margin, SIZE_PX - 2 * margin - 260
+    bar_left, bar_max = MARGIN, SIZE_PX - 2 * MARGIN - 260
     block, thickness, top = 138, 58, 400
     for i, (level, n) in enumerate(counts.items()):
         y = top + i * block
@@ -136,21 +224,61 @@ def chart(counts: pd.Series, total: int, path: Path) -> None:
                  BAR_HIGHLIGHT if level == HIGHLIGHT else BAR_MUTED)
         value = ax.text(bar_left + length + 22, bar_y + thickness / 2, f"{n}",
                         color=TEXT_PRIMARY, fontsize=17, fontweight="bold", va="center")
-        fig.canvas.draw()
-        value_right = ax.transData.inverted().transform(
-            value.get_window_extent().get_points())[1][0]
-        ax.text(value_right + 12, bar_y + thickness / 2, f"{100 * n / total:.0f}%",
+        ax.text(right_edge(fig, ax, value) + 12, bar_y + thickness / 2, f"{100 * n / total:.0f}%",
                 color=TEXT_SECONDARY, fontsize=12, va="center")
+    save(fig, path)
 
-    note = ("Development team: U23 squad of a WorldTeam or ProTeam.\n"
-            "Stagiaire contracts don't count as stepping up.")
-    ax.text(margin, 958, note, color=TEXT_MUTED, fontsize=8.5, va="top", linespacing=1.4)
-    ax.text(margin, 1024, "Source: ProCyclingStats", color=TEXT_MUTED, fontsize=8.5, va="top")
-    ax.text(SIZE_PX - margin, 1024, "@DatosARueda", color=TEXT_MUTED, fontsize=8.5,
-            va="top", ha="right")
 
-    fig.savefig(path, dpi=DPI, facecolor=BACKGROUND)
-    plt.close(fig)
+def chart_bars(table: pd.DataFrame) -> list[tuple[str, list[int]]]:
+    """(label, segments) per bar: one segment per team, sized in riders.
+
+    If there are too many teams to read on a phone, the single-rider teams
+    fold into one bar with a segment for each of them.
+    """
+    bars = [(sponsor, [n]) for sponsor, n in zip(table["sponsor"], table["riders"])]
+    singles = [bar for bar in bars if bar[1] == [1]]
+    if len(bars) <= MOBILE_MAX_BARS or len(singles) < 2:
+        return bars
+    kept = [bar for bar in bars if bar[1] != [1]]
+    return kept + [(f"{len(singles)} teams with 1 rider each", [1] * len(singles))]
+
+
+def development_teams_chart(table: pd.DataFrame, path: Path) -> None:
+    """All bars gray: the story is how spread out the teams are, not a leader."""
+    total = int(table["riders"].sum())
+    fig, ax = canvas(
+        f"{total} riders,\n{len(table)} different development teams",
+        f"Where the {total} riders who stepped up from a development squad came from",
+        "Renamed teams are grouped (e.g. Jumbo-Visma and Visma | Lease a Bike).\n"
+        "Stagiaire contracts don't count as stepping up.",
+    )
+    bars = chart_bars(table)
+    top, bottom = 352, 930
+    row = (bottom - top) / len(bars)
+    thickness = min(26, row * 0.62)
+    fontsize = min(12.5, row / 3.7)
+    labels = [
+        ax.text(MARGIN, top + row * (i + 0.5), label, color=TEXT_PRIMARY, fontsize=fontsize,
+                va="center")
+        for i, (label, _) in enumerate(bars)
+    ]
+    bar_left = max(right_edge(fig, ax, label) for label in labels) + 26
+    bar_max = SIZE_PX - MARGIN - bar_left - 60  # room for the value at the tip
+    per_rider = bar_max / max(sum(segments) for _, segments in bars)
+    for i, (_, segments) in enumerate(bars):
+        center, x = top + row * (i + 0.5), bar_left
+        for k, size in enumerate(segments):
+            last = k == len(segments) - 1
+            length = per_rider * size - (0 if last else SEGMENT_GAP)
+            if last:
+                draw_bar(ax, x, center - thickness / 2, length, thickness, BAR_MUTED, radius=8)
+            else:
+                ax.add_patch(Rectangle((x, center - thickness / 2), length, thickness,
+                                       linewidth=0, facecolor=BAR_MUTED, snap=False))
+            x += length + (0 if last else SEGMENT_GAP)
+        ax.text(x + 16, center, f"{sum(segments)}", color=TEXT_PRIMARY, fontsize=fontsize + 1,
+                fontweight="bold", va="center")
+    save(fig, path)
 
 
 def main() -> None:
@@ -159,14 +287,23 @@ def main() -> None:
 
     table = pathways(riders, teams)
     table.to_csv(DATA_DIR / "pathways.csv", index=False, sep=";", encoding="utf-8-sig")
-
     counts = table["arrived_from_level"].value_counts().reindex(CATEGORIES.keys(), fill_value=0)
     counts = counts.sort_values(ascending=False, kind="stable")
-    chart(counts, len(table), DATA_DIR / "pathways.png")
-
+    pathways_chart(counts, len(table), DATA_DIR / "pathways.png")
     print(f"{len(table)} riders -> data/pathways.csv, data/pathways.png")
     for level, n in counts.items():
         print(f"  {CATEGORIES[level]:30} {n:3}")
+
+    devo = development_teams(table)
+    devo.to_csv(DATA_DIR / "development_teams.csv", index=False, sep=";", encoding="utf-8-sig")
+    development_teams_chart(devo, DATA_DIR / "development_teams.png")
+    top_count = devo["riders"].max()
+    if (devo["riders"] == top_count).sum() > 1:
+        print(f"note: {(devo['riders'] == top_count).sum()} development teams tie at {top_count}")
+    print(f"{devo['riders'].sum()} riders from {len(devo)} development teams "
+          "-> data/development_teams.csv, data/development_teams.png")
+    for row in devo.itertuples():
+        print(f"  {row.sponsor:30} {row.riders:3}   {row.team_names}")
 
 
 if __name__ == "__main__":
