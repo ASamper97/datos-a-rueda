@@ -14,7 +14,7 @@ Three separate layers; each one only reads the output of the previous one.
 |---|---|---|
 | `fetch.py` | Downloads PCS pages into `cache/`, one file per URL | The only layer that uses it |
 | `parse.py` | Reads `cache/` and writes `data/riders.parquet`, `data/teams.parquet`, `data/riders.csv` | Never |
-| `analyze.py` | Reads the parquet files and writes `data/pathways.csv` and `data/pathways.png` (how riders reached their first WorldTeam/ProTeam) | Never |
+| `analyze.py` | Reads the parquet files and writes the charts and tables described in [Analysis](#analysis) | Never |
 
 ```bash
 python -m venv .venv
@@ -28,6 +28,18 @@ python analyze.py
 `fetch.py` needs an identifying User-Agent in `user_agent.txt` (git-ignored), e.g. `Your Name (https://x.com/your_handle)`.
 
 Definitions and decisions are documented in [`BRIEF.md`](BRIEF.md) (in Spanish) and at the top of `parse.py`.
+
+## Analysis
+
+`analyze.py` writes three square charts to `data/`, each with the CSV table behind it:
+
+| Output | What it shows |
+|---|---|
+| `pathways.png` / `.csv` | How riders reached their first WorldTeam or ProTeam: from a development team, a Continental team, an amateur team, or with no previous team listed |
+| `development_teams.png` / `.csv` | For riders who stepped up straight from a development team, how many came from each one (renamed teams grouped) |
+| `age_by_route.png` / `.csv` | Age when joining the first WorldTeam or ProTeam, by route of entry, one dot per rider, with permutation tests on the differences |
+
+All three outputs are reproduced by running `fetch.py`, `parse.py` and `analyze.py`, in that order, with PCS data as of the download date.
 
 ## Data use rules
 
