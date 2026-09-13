@@ -14,7 +14,7 @@ Three separate layers; each one only reads the output of the previous one.
 |---|---|---|
 | `fetch.py` | Downloads PCS pages into `cache/`, one file per URL | The only layer that uses it |
 | `parse.py` | Reads `cache/` and writes `data/riders.parquet`, `data/teams.parquet`, `data/riders.csv` | Never |
-| `analyze.py` | Aggregates the parquet files into tables and charts | Never (not written yet) |
+| `analyze.py` | Reads the parquet files and writes `data/pathways.csv` and `data/pathways.png` (how riders reached their first WorldTeam/ProTeam) | Never |
 
 ```bash
 python -m venv .venv
@@ -22,6 +22,7 @@ python -m venv .venv
 pip install procyclingstats requests beautifulsoup4 lxml pandas pyarrow matplotlib
 python fetch.py riders --born-from 2001
 python parse.py
+python analyze.py
 ```
 
 `fetch.py` needs an identifying User-Agent in `user_agent.txt` (git-ignored), e.g. `Your Name (https://x.com/your_handle)`.
